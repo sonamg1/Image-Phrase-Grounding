@@ -13,6 +13,8 @@ slim_models_path = '/home/sonam/models/'
 sys.path.append(slim_models_path)
 import pycocotools.mask as maskUtils
 
+######################################   PreTrain Model    #############################################################
+
 # Load Pretrain Model
 def load_model(model_path,config):
     new_graph = tf.Graph()
@@ -21,246 +23,6 @@ def load_model(model_path,config):
     _ = sess.run([tf.global_variables_initializer(), tf.tables_initializer()])
     new_saver.restore(sess, model_path)
     return sess, new_graph
-
-
-# Ann to Mask
-def annToMask(ann,size):
-    h,w,_ = size
-    segm = ann['segmentation']
-    if type(segm) == list:
-        # polygon -- a single object might consist of multiple parts
-        # we merge all parts into one mask rle code
-        rles = maskUtils.frPyObjects(segm, h, w)
-        rle = maskUtils.merge(rles)
-    elif type(segm['counts']) == list:
-        # uncompressed RLE
-        rle = maskUtils.frPyObjects(segm, h, w)
-    else:
-        # rle
-        rle = ann['segmentation']
-    m = maskUtils.decode(rle)
-    return m
-
-# Preprocess Images
-def pre_process(image, pre_processing_name):
-    if pre_processing_name == 'vgg_preprocessing':
-        with tf.variable_scope(pre_processing_name):
-            image = tf.subtract(image, [123.68, 116.78, 103.94])
-
-    elif pre_processing_name == 'inception_preprocessing':
-        with tf.variable_scope(pre_processing_name):
-            # image should be in range [-1,1]
-            image = tf.divide(image, 255.0)
-            image = tf.subtract(image, .5)
-            image = tf.multiply(image, 2.0)
-    else:
-        raise ValueError('Provide a valid/supported model name.')
-        return
-    return image
-
-def add_1by1_conv(feat_map, n_layers, n_filters, name, regularizer):
-    with tf.variable_scope(name + '_postConv'):
-        for i in range(n_layers):
-            with tf.variable_scope(name + '_stage_' + str(i)):
-                feat_map = tf.layers.conv2d(feat_map, filters=n_filters[i], kernel_size=[1, 1],
-                                            kernel_regularizer=regularizer)
-                feat_map = tf.nn.leaky_relu(feat_map, alpha=.25)
-    return feat_map
-
-
-def add_3by3_conv(feat_map, n_layers, n_filters, name, regularizer):
-    with tf.variable_scope(name + '_postConv'):
-        for i in range(n_layers):
-            with tf.variable_scope(name + '_stage_' + str(i)):
-                feat_map = tf.layers.conv2d(feat_map, filters=n_filters[i], kernel_size=[3, 3],
-                                            kernel_regularizer=regularizer, padding='same')
-                feat_map = tf.nn.leaky_relu(feat_map, alpha=.25)
-    return feat_map
-
-
-def depth_selection_3layer_vg(model, regularizer, conv_method=3, n_layers=1):
-    # vgg conv5_1, conv5_3
-    # vgg conv5_1, conv5_3 , size is 37x37
-    if conv_method == 3:
-        conv = add_3by3_conv
-    else:
-        conv = add_1by1_conv
-
-    with tf.variable_scope('stack_v'):
-        v1 = tf.identity(model['vgg_16/conv5/conv5_1'], name='v1')
-        v1 = conv(v1, n_layers, n_filters=[1024, 1024, 1024], name='v1', regularizer=regularizer)
-        size = v1.get_shape().as_list()[1:3]
-        resize_method = tf.image.ResizeMethod.BILINEAR
-        v2 = tf.identity(model['vgg_16/conv5/conv5_3'], name='v2')
-        v2 = tf.image.resize_images(v2, size, method=resize_method)
-        v2 = conv(v2, n_layers, n_filters=[1024, 1024, 1024], name='v2', regularizer=regularizer)
-        v3 = tf.identity(model['vgg_16/conv4/conv4_1'], name='v3')
-        v3 = tf.image.resize_images(v3, size, method=resize_method)
-        v3 = conv(v3, n_layers, n_filters=[1024, 1024, 1024], name='v3', regularizer=regularizer)
-        v_all = tf.stack([v1, v2, v3], axis=3)
-        v_all = tf.reshape(v_all, [-1, v_all.shape[1] * v_all.shape[2], v_all.shape[3], v_all.shape[4]])
-        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')  # ?
-
-    return v_all
-
-
-def depth_selection_vgg(model, regularizer, conv_kernel_size=3, n_layers=1):
-    '''
-    downsample first 2 layers to 18x18 concat and pass through 3x3 conv 
-    '''
-    if conv_kernel_size == 3:
-        conv_method = add_3by3_conv
-    else:
-        conv_method = add_1by1_conv
-
-    with tf.variable_scope('stack_v'):
-        v1 = tf.identity(model['vgg_16/conv5/conv5_1'], name='v1') # 37×37×512
-        v1 = conv_method (v1, n_layers, n_filters=[1024, 1024, 1024], name='v1', regularizer=regularizer)
-        size = v1.get_shape().as_list()[1:3]
-        resize_method = tf.image.ResizeMethod.BILINEAR
-        v2 = tf.identity(model['vgg_16/conv5/conv5_3'], name='v2') # 37×37×512
-        # v2 = tf.image.resize_images(v2, size, method=resize_method)
-        v2 = conv_method (v2, n_layers, n_filters=[1024, 1024, 1024], name='v2', regularizer=regularizer)
-        v3 = tf.identity(model['vgg_16/conv4/conv4_1'], name='v3') # 18×18×512
-        v3 = tf.image.resize_images(v3, size, method=resize_method)
-        v3 = conv_method (v3, n_layers, n_filters=[1024, 1024, 1024], name='v3', regularizer=regularizer)
-        v4 = tf.identity(model['vgg_16/conv4/conv4_3'], name='v4') # 18×18×512
-        v4 = tf.image.resize_images(v4, size, method=resize_method)
-        v4 = conv_method (v4, n_layers, n_filters=[1024, 1024, 1024], name='v4', regularizer=regularizer)
-        v_all = tf.stack([v1, v2, v3, v4], axis=3)
-        v_all = tf.reshape(v_all, [-1, v_all.shape[1] * v_all.shape[2], v_all.shape[3], v_all.shape[4]])
-        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
-    return v_all
-
-
-def depth_selection_pnasnet(model, regularizer, conv_kernel_size=3, n_layers = 3):
-    '''
-   upsample last 2 layers to 19x19 change to 1024 channels
-    
-    '''
-    conv_method = None
-    if conv_kernel_size == 1:
-        conv_method = add_1by1_conv
-    elif conv_kernel_size == 3:
-        conv_method = add_3by3_conv
-    else:
-        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
-    with tf.variable_scope('stack_v'):
-        v1 = tf.identity(model['Cell_5'],name='v1')    # 19×19×2160
-        v1 = conv_method(v1,n_layers,n_filters=[1024],name='v1',regularizer=regularizer)  
-        size = v1.get_shape().as_list()[1:3]
-        resize_method = tf.image.ResizeMethod.BILINEAR
-        v2 = tf.identity(model['Cell_7'],name='v2')    # 19×19×2160
-       #v2 = tf.image.resize_images(v2, size, method=resize_method)
-        v2 = conv_method(v2,n_layers,n_filters=[1024],name='v2',regularizer=regularizer) 
-        v3 = tf.identity(model['Cell_9'],name='v3')              # 10×10×4320
-        v3 = tf.image.resize_images(v3, size, method=resize_method)
-        v3 = conv_method(v3,n_layers,n_filters=[1024],name='v3',regularizer=regularizer)
-        v4 = tf.identity(model['Cell_11'],name='v4')   # 10×10×4320
-        v4 = tf.image.resize_images(v4, size, method=resize_method)
-        v4 = conv_method(v4,n_layers,n_filters=[1024],name='v4',regularizer=regularizer)
-        v_all = tf.stack([v1,v2,v3,v4], axis=3)
-        v_all = tf.reshape(v_all,[-1,v_all.shape[1]*v_all.shape[2],v_all.shape[3],v_all.shape[4]])
-        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
-    return v_all
-
-def depth_selection_pyramid_vgg(model,regularizer, conv_kernel_size = 3, n_layers=1):
-    '''
-    take 2 layers upsample to 37x37 and then concatenate all 4 and pass thorugh 
-    3x3 conv to reduce no of channels to 1024
-    '''
-    conv_method = None
-    if conv_kernel_size == 1:
-        conv_method = add_1by1_conv
-    elif conv_kernel_size == 3:
-        conv_method = add_3by3_conv
-    else:
-        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
-
-    with tf.variable_scope('stack_v'):
-        v4 = tf.identity(model['vgg_16/conv4/conv4_3'], name='v4')
-        v3 = tf.identity(model['vgg_16/conv4/conv4_1'], name='v3')
-        v2 = tf.identity(model['vgg_16/conv5/conv5_3'], name='v2')
-        v1 = tf.identity(model['vgg_16/conv5/conv5_1'], name='v1')
-        v2 = tf.layers.conv2d_transpose(v2, filters=512, kernel_size=(3, 3), strides=(2, 2))
-        v1 = tf.layers.conv2d_transpose(v1, filters=512, kernel_size=(3, 3), strides=(2, 2))
-        v_all = tf.concat([v4, v3, v2, v1], axis=3)
-        v_all = conv_method(v_all, n_layers, n_filters=[1024, 1024, 1024], name='v_all', regularizer=regularizer)
-        # flattening image
-        v_all = tf.reshape(v_all, [-1, v_all.shape[1] * v_all.shape[2], v_all.shape[3]])
-        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
-        v_all = tf.expand_dims(v_all, 2)  # ?XNX1XD
-    return v_all
-
-def depth_selection_pyramid_pnas(model, regularizer, conv_kernel_size =3, n_layers = 1):
-    '''
-    vis_model.outputs
-    take last layer then resize to second layer and then 3x3 conv
-    second, third layer 3x3 conv to 38x38 and then 1x1 conv on first layer to bring to same space
-    then concat all and pass 3x3 conv to combine
-    '''
-    conv_method = None
-    if conv_kernel_size == 1:
-        conv_method = add_1by1_conv
-    elif conv_kernel_size == 3:
-        conv_method = add_3by3_conv
-    else:
-        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
-   
-    with tf.variable_scope('stack_v'): 
-        v1 = tf.identity(model['Cell_3'],name='v1') #38x38x1080
-        v2 = tf.identity(model['Cell_5'],name='v2') #19x19x2160
-        v3 = tf.identity(model['Cell_7'],name='v3') #19x19x2160
-        v4 = tf.identity(model['Cell_9'],name='v4')#10x10x4320
-        
-        resize_method = tf.image.ResizeMethod.BILINEAR
-        size = v2.get_shape().as_list()[1:3]
-        v4 = tf.image.resize_images(v4,size , method=resize_method)#19x19x4320
-        v4 = tf.layers.conv2d_transpose(v4, filters = 512, kernel_size=(2,2), strides = (2,2), padding=
-                                       'valid')
-        v3 = tf.layers.conv2d_transpose(v3, filters = 512, kernel_size=(2,2), strides = (2,2), padding=
-                                       'valid')
-        v2 = tf.layers.conv2d_transpose(v2, filters = 512, kernel_size=(2,2), strides = (2,2), padding=
-                                       'valid')
-        v1 = tf.layers.conv2d(v1, filters=512, kernel_size=[1,1], padding='same')
-        
-        v_all  = tf.concat([v4,v3,v2,v1], axis = 3)
-        v_all = conv_method(v_all,n_layers=1,n_filters=[1024],name='v_all',regularizer=regularizer)
-        v_all = tf.reshape(v_all,[-1,v_all.shape[1]*v_all.shape[2],v_all.shape[3]])
-        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
-        v_all = tf.expand_dims(v_all, 2)
-    
-    return v_all
-
-def depth_selection_newattn_vgg(model, regularizer, conv_kernel_size =3, n_layers=1):
-    
-    conv_method = None
-    if conv_kernel_size == 1:
-        conv_method = add_1by1_conv
-    elif conv_kernel_size == 3:
-        conv_method = add_3by3_conv
-    else:
-        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
-
-    with tf.variable_scope('stack_v'):
-        v4 = tf.identity(model['vgg_16/conv4/conv4_3'], name='v4')
-        v3 = tf.identity(model['vgg_16/conv4/conv4_1'], name='v3')
-        v2 = tf.identity(model['vgg_16/conv5/conv5_3'], name='v2')
-        v1 = tf.identity(model['vgg_16/conv5/conv5_1'], name='v1')
-        
-        v4 = tf.layers.conv2d(v4, 512, (2,2), (2,2))
-        v3 = tf.layers.conv2d(v3, 512, (2,2), (2,2))
-        v_all = tf.concat([v4, v3, v2, v1], axis=3) # 18x18x2048
-        v_all = conv_method(v_all, n_layers, n_filters=[512,512,512], name='v_all',regularizer=regularizer)
-        
-        # flattening image
-        v_all = tf.reshape(v_all, [-1, v_all.shape[1] * v_all.shape[2], v_all.shape[3]])
-        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
-        v_all = tf.expand_dims(v_all, 2)  # ?XNX1XD
-        
-    return v_all
-
-
 
 
 # Load Pretrained Model
@@ -355,14 +117,332 @@ class pre_trained_load():
     def __getitem__(self, key):
         return self.outputs[key]
 
+######################################     Masking    #############################################################
+# Ann to Mask
+def annToMask(ann,size):
+    h,w,_ = size
+    segm = ann['segmentation']
+    if type(segm) == list:
+        # polygon -- a single object might consist of multiple parts
+        # we merge all parts into one mask rle code
+        rles = maskUtils.frPyObjects(segm, h, w)
+        rle = maskUtils.merge(rles)
+    elif type(segm['counts']) == list:
+        # uncompressed RLE
+        rle = maskUtils.frPyObjects(segm, h, w)
+    else:
+        # rle
+        rle = ann['segmentation']
+    m = maskUtils.decode(rle)
+    return m
+
+######################################     Preprocess Images    #############################################################
+def pre_process(image, pre_processing_name):
+    if pre_processing_name == 'vgg_preprocessing':
+        with tf.variable_scope(pre_processing_name):
+            image = tf.subtract(image, [123.68, 116.78, 103.94])
+
+    elif pre_processing_name == 'inception_preprocessing':
+        with tf.variable_scope(pre_processing_name):
+            # image should be in range [-1,1]
+            image = tf.divide(image, 255.0)
+            image = tf.subtract(image, .5)
+            image = tf.multiply(image, 2.0)
+    else:
+        raise ValueError('Provide a valid/supported model name.')
+        return
+    return image
+
+######################################     Visual Models    #############################################################
+
+def add_1by1_conv(feat_map, n_layers, n_filters, name, regularizer):
+    with tf.variable_scope(name + '_postConv'):
+        for i in range(n_layers):
+            with tf.variable_scope(name + '_stage_' + str(i)):
+                feat_map = tf.layers.conv2d(feat_map, filters=n_filters[i], kernel_size=[1, 1],
+                                            kernel_regularizer=regularizer)
+                feat_map = tf.nn.leaky_relu(feat_map, alpha=.25)
+    return feat_map
+
+
+def add_3by3_conv(feat_map, n_layers, n_filters, name, regularizer):
+    with tf.variable_scope(name + '_postConv'):
+        for i in range(n_layers):
+            with tf.variable_scope(name + '_stage_' + str(i)):
+                feat_map = tf.layers.conv2d(feat_map, filters=n_filters[i], kernel_size=[3, 3],
+                                            kernel_regularizer=regularizer, padding='same')
+                feat_map = tf.nn.leaky_relu(feat_map, alpha=.25)
+    return feat_map
+
+######################################     PnasNet    #############################################################
+
+def depth_selection_pnasnet(model, regularizer, conv_kernel_size=3, n_layers = 3):
+    '''
+   upsample last 2 layers to 19x19 change to 1024 channels and generate a multifeature map
+    
+    '''
+    conv_method = None
+    if conv_kernel_size == 1:
+        conv_method = add_1by1_conv
+    elif conv_kernel_size == 3:
+        conv_method = add_3by3_conv
+    else:
+        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
+    with tf.variable_scope('stack_v'):
+        v1 = tf.identity(model['Cell_5'],name='v1')    # 19×19×2160
+        v1 = conv_method(v1,n_layers,n_filters=[1024],name='v1',regularizer=regularizer)  
+        size = v1.get_shape().as_list()[1:3]
+        resize_method = tf.image.ResizeMethod.BILINEAR
+        v2 = tf.identity(model['Cell_7'],name='v2')    # 19×19×2160
+       #v2 = tf.image.resize_images(v2, size, method=resize_method)
+        v2 = conv_method(v2,n_layers,n_filters=[1024],name='v2',regularizer=regularizer) 
+        v3 = tf.identity(model['Cell_9'],name='v3')              # 10×10×4320
+        v3 = tf.image.resize_images(v3, size, method=resize_method)
+        v3 = conv_method(v3,n_layers,n_filters=[1024],name='v3',regularizer=regularizer)
+        v4 = tf.identity(model['Cell_11'],name='v4')   # 10×10×4320
+        v4 = tf.image.resize_images(v4, size, method=resize_method)
+        v4 = conv_method(v4,n_layers,n_filters=[1024],name='v4',regularizer=regularizer)
+        v_all = tf.stack([v1,v2,v3,v4], axis=3)
+        v_all = tf.reshape(v_all,[-1,v_all.shape[1]*v_all.shape[2],v_all.shape[3],v_all.shape[4]])
+        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
+    return v_all
+
+def depth_selection_pnasnet_pyramid(model, regularizer, conv_kernel_size =3, n_layers = 1):
+    '''
+    vis_model.outputs
+    take last layer then resize to second layer and then 3x3 conv
+    second, third layer 3x3 conv to 38x38 and then 1x1 conv on first layer to bring to same space
+    then concat all and pass 3x3 conv to combine
+    '''
+    conv_method = None
+    if conv_kernel_size == 1:
+        conv_method = add_1by1_conv
+    elif conv_kernel_size == 3:
+        conv_method = add_3by3_conv
+    else:
+        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
+   
+    with tf.variable_scope('stack_v'): 
+        v1 = tf.identity(model['Cell_3'],name='v1') #38x38x1080
+        v2 = tf.identity(model['Cell_5'],name='v2') #19x19x2160
+        v3 = tf.identity(model['Cell_7'],name='v3') #19x19x2160
+        v4 = tf.identity(model['Cell_9'],name='v4') #10x10x4320
+        
+        resize_method = tf.image.ResizeMethod.BILINEAR
+        size = v2.get_shape().as_list()[1:3]
+        size_2 = v1.get_shape().as_list()[1:3]
+        
+        v4 = tf.image.resize_images(v4,size , method=resize_method)#19x19x4320
+        v4 = tf.layers.conv2d(v4, filters= 2048,kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer) 
+        v4 = tf.layers.conv2d(v4, filters= 1024,name='v4',kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer)#19x19x
+        
+        v2 = tf.layers.conv2d(v2, filters= 2048, kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer)
+        v2 = tf.layers.conv2d(v2, filters= 1024, name='v2',kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer)
+        
+        v3 = tf.layers.conv2d(v3, filters= 2048,kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer)
+        v3 = tf.layers.conv2d(v3, filters= 1024,name='v3',kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer)
+        
+        v_all_1  = tf.concat([v4,v3,v2], axis = 3) #19x19x(1024x3)
+        v_all_1 = tf.image.resize_images(v_all_1,size_2 , method=resize_method)#38x38x(1024x3)
+  
+        v1 = tf.layers.conv2d(v1, filters= 1024,name='v1',kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer) 
+    
+        v_all  = tf.concat([v_all_1, v1], axis = 3) #38x38x(1024x4)
+        v_all = conv_method(v_all,n_layers,n_filters=[2048,1024,1024],name='v_all',regularizer=regularizer)# 2 filters
+        v_all = tf.reshape(v_all,[-1,v_all.shape[1]*v_all.shape[2],v_all.shape[3]])
+        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
+        v_all = tf.expand_dims(v_all, 2)
+    
+    return v_all
+
+
+######################################     VG    #############################################################
+
+def depth_selection_vgg(model, regularizer, conv_kernel_size=3, n_layers=1):
+    '''
+    downsample first 2 layers to 18x18 concat and pass through 3x3 conv multilevel
+    '''
+    if conv_kernel_size == 3:
+        conv_method = add_3by3_conv
+    else:
+        conv_method = add_1by1_conv
+
+    with tf.variable_scope('stack_v'):
+        v1 = tf.identity(model['vgg_16/conv5/conv5_1'], name='v1') # 18×18×512
+        v1 = conv_method (v1, n_layers, n_filters=[1024, 1024, 1024], name='v1', regularizer=regularizer)
+        size = v1.get_shape().as_list()[1:3]
+        resize_method = tf.image.ResizeMethod.BILINEAR
+        v2 = tf.identity(model['vgg_16/conv5/conv5_3'], name='v2') # 18×18×512
+        # v2 = tf.image.resize_images(v2, size, method=resize_method)
+        v2 = conv_method (v2, n_layers, n_filters=[1024, 1024, 1024], name='v2', regularizer=regularizer)
+        v3 = tf.identity(model['vgg_16/conv4/conv4_1'], name='v3') # 37×37×512
+        v3 = tf.image.resize_images(v3, size, method=resize_method)
+        v3 = conv_method (v3, n_layers, n_filters=[1024, 1024, 1024], name='v3', regularizer=regularizer)
+        v4 = tf.identity(model['vgg_16/conv4/conv4_3'], name='v4') # 37×37×512
+        v4 = tf.image.resize_images(v4, size, method=resize_method)
+        v4 = conv_method (v4, n_layers, n_filters=[1024, 1024, 1024], name='v4', regularizer=regularizer)
+        v_all = tf.stack([v1, v2, v3, v4], axis=3)
+        v_all = tf.reshape(v_all, [-1, v_all.shape[1] * v_all.shape[2], v_all.shape[3], v_all.shape[4]])
+        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
+    return v_all
+
+def depth_selection_vgg_pyramid(model,regularizer, conv_kernel_size = 3, n_layers=1):
+    '''
+    take 2 layers upsample to 37x37 dont use transpose convolution and then concatenate all 4 and pass thorugh 
+    3x3 conv to reduce no of channels to 1024
+    '''
+    conv_method = None
+    if conv_kernel_size == 1:
+        conv_method = add_1by1_conv
+    elif conv_kernel_size == 3:
+        conv_method = add_3by3_conv
+    else:
+        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
+
+    with tf.variable_scope('stack_v'):
+        
+        v4 = tf.identity(model['vgg_16/conv4/conv4_3'], name='v4') # 37×37×512
+        v3 = tf.identity(model['vgg_16/conv4/conv4_1'], name='v3') # 37×37×512
+        v2 = tf.identity(model['vgg_16/conv5/conv5_3'], name='v2') # 18×18×512
+        v1 = tf.identity(model['vgg_16/conv5/conv5_1'], name='v1') # 18×18×512
+        
+        size = v3.get_shape().as_list()[1:3]
+        resize_method = tf.image.ResizeMethod.BILINEAR
+        v1 = tf.image.resize_images(v1, size, method=resize_method)
+        v2 = tf.image.resize_images(v2, size, method=resize_method)
+        
+        v1 = tf.layers.conv2d(v1, filters= 512,name='v1',kernel_size=[3, 3], padding='same',kernel_regularizer=regularizer)
+                             
+        v2 = tf.layers.conv2d(v2, filters= 512 ,name='v2',kernel_size=[3, 3], kernel_regularizer=regularizer, padding='same')
+        
+        v3 = tf.layers.conv2d(v3, filters= 512 ,name='v3',kernel_size=[3, 3], kernel_regularizer=regularizer, padding='same')
+        
+        v4 = tf.layers.conv2d(v4, filters= 512 ,name='v4',kernel_size=[3, 3], kernel_regularizer=regularizer, padding='same')
+        v_all = tf.concat([v4, v3, v2, v1], axis=3)
+        v_all = conv_method(v_all, n_layers, n_filters=[1024, 1024, 1024], name='v_all', regularizer=regularizer)
+        # flattening image
+        v_all = tf.reshape(v_all, [-1, v_all.shape[1] * v_all.shape[2], v_all.shape[3]])
+        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
+        v_all = tf.expand_dims(v_all, 2)  # ?XNX1XD
+        
+    return v_all
+
+
+
+
+
+def depth_selection_newattn_vgg(model, regularizer, conv_kernel_size =3, n_layers=1):
+    
+    conv_method = None
+    if conv_kernel_size == 1:
+        conv_method = add_1by1_conv
+    elif conv_kernel_size == 3:
+        conv_method = add_3by3_conv
+    else:
+        raise ValueError('Invalid conv_kernel_size parameter. Should be either 1 or 3.')
+
+    with tf.variable_scope('stack_v'):
+        v4 = tf.identity(model['vgg_16/conv4/conv4_3'], name='v4')
+        v3 = tf.identity(model['vgg_16/conv4/conv4_1'], name='v3')
+        v2 = tf.identity(model['vgg_16/conv5/conv5_3'], name='v2')
+        v1 = tf.identity(model['vgg_16/conv5/conv5_1'], name='v1')
+        
+        v4 = tf.layers.conv2d(v4, 512, (2,2), (2,2))
+        v3 = tf.layers.conv2d(v3, 512, (2,2), (2,2))
+        v_all = tf.concat([v4, v3, v2, v1], axis=3) # 18x18x2048
+        v_all = conv_method(v_all, n_layers, n_filters=[512,512,512], name='v_all',regularizer=regularizer)
+        
+        # flattening image
+        v_all = tf.reshape(v_all, [-1, v_all.shape[1] * v_all.shape[2], v_all.shape[3]])
+        v_all = tf.nn.l2_normalize(v_all, axis=-1, name='stacked_image_feature_maps')
+        v_all = tf.expand_dims(v_all, 2)  # ?XNX1XD
+        
+    return v_all
+
+
+
+
+######################################     Attention   #############################################################
+
+def attn_new(e_w, v, e_s):
+    '''
+    e_w:?xTXD , v:?XNx1XD, e_s:?XD
+    return: heatmap_wd ?xTX (37X37) , heatmap_sd ?X(37X37)
+    '''
+    v = tf.squeeze(v, 2)
+
+    with tf.variable_scope('attention'):
+        resolution = v.get_shape()[1]
+        dim = tf.shape(v)[2]
+        wrd_len = tf.shape(e_w)[1]
+        N0_g = int(np.sqrt(v.get_shape().as_list()[1]))
+        ### Word-Level
+
+        new_e_w = tf.expand_dims(e_w, 2)  # ?TX1XD
+        new_e_w = tf.tile(new_e_w, [1, 1, resolution, 1])  # ?xT*NXD
+        new_v = tf.expand_dims(v, 1)  # ?x1XNXD
+        new_v = tf.tile(new_v, [1, wrd_len, 1, 1])  # ?xT*NXD
+        v_w = tf.concat([new_e_w, new_v], axis=3)  # ?xT*NX2D
+
+    h_w = tf.layers.dense(v_w, units=512, name='attn_space_1', reuse=tf.AUTO_REUSE)  # ?xT*NX512
+    h_w = tf.math.tanh(h_w)
+    h_w = tf.layers.dense(h_w, units=1, name='attn_space_2', reuse=tf.AUTO_REUSE)  # ?xT*NX1
+    
+    # attention
+    a = tf.einsum('bijk,bjkl->bilk', h_w, v)  # ?xTxDx4 attnded visual reps for each of T words
+    # pair-wise score
+    a_norm = tf.nn.l2_normalize(a, axis=2)
+    e_w_norm = tf.nn.l2_normalize(e_w, axis=2)
+    R_ik = tf.einsum('bilk,bil->bik', a_norm, e_w_norm)  # cosine for T (words,img_reps) for all pairs
+    R_ik = tf.identity(R_ik, name='level_score_word')
+    R_i = tf.reduce_max(R_ik, axis=-1, name='score_word')  # ?xT
+    
+    with tf.variable_scope('attention'):
+        h_w = tf.squeeze(h_w, 3)  # ?xT*N
+        h_w = tf.nn.relu(h_w)  # ?xT*N
+        heatmap_wd = tf.reshape(h_w, [tf.shape(h_w)[0], tf.shape(h_w)[1], N0_g, N0_g],
+                                name="heatmap_word")  # ?xTX37X37
+        ### Sentence-Level ###
+        new_e_s = tf.expand_dims(e_s, 1)  # ?x1XD
+        new_e_s = tf.tile(new_e_s, [1, resolution, 1])  # ?xNXD
+        v_s = tf.concat([new_e_s, v], axis=2)  # ?xNX2D
+
+    h_s = tf.layers.dense(v_s, units=512, name='attn_space_1', reuse=tf.AUTO_REUSE)  # ?xNX512
+    h_s = tf.math.tanh(h_s)
+    h_s = tf.layers.dense(h_s, units=1, name='attn_space_2', reuse=tf.AUTO_REUSE)  # ?xNx1
+    
+    # attention
+    a_s = tf.einsum('bjk,bjki->bik', h_s, v)  # ?xDx4 attnded visual reps for sen.
+    # pair-wise score
+    a_s_norm = tf.nn.l2_normalize(a_s, axis=1)
+    e_s_norm = tf.nn.l2_normalize(e_s, axis=1)
+    R_sk = tf.einsum('bik,bi->bk', a_s_norm, e_s_norm)  # cosine for (sen,img_reps)
+    R_sk = tf.identity(R_sk, name='level_score_sentence')
+    R_s = tf.reduce_mean(R_sk, axis=-1, name='score_sentence')  # ?
+
+    with tf.variable_scope('attention'):
+        h_s = tf.squeeze(h_s, -1)
+        h_s = tf.nn.relu(h_s)  # ?*N
+        heatmap_sd = tf.reshape(h_s, [-1, N0_g, N0_g], name="heatmap_sentence")  # ?X37X37
+
+    return heatmap_wd, heatmap_sd
+    
 
 def attn(e_w, v, e_s):
+    '''
+ take dot product of each pixel with each word, get heatmap for each word (h) scores with each pixel (0-1)
+ take dot product of this heat map with all pixels dim and add to get one 4 attended visual features(dim-1024) for each word (a)
+ R_ik = level score word : ?xTx4:  normalised this attended visual and word embedding then take dot product to get R_ik 
+ R_i = score word : ?xTx1: max word for each level
+ heatmap_w : max heatmap selected for each word ?xTX(MXM)X1
+ hwatmap_s :max heatmap selected for each word ?x(MXM)X1
+    '''
     ## Inputs: local and global cap and img features ##
     ## Output: Heatmap for each word, Global Heatmap, Attnded Vis features, Corr-vals
     # e: ?xTxD, v: ?xNx4xD, e_bar: ?xD
 
     with tf.variable_scope('attention'):
-        ###word-level###
+        ###word-leve
         # heatmap pool
         h = tf.nn.relu(tf.einsum('bij,bklj->bikl', e_w, v))  # pair-wise ev^T: ?xTxNx4
         # attention
@@ -371,7 +451,7 @@ def attn(e_w, v, e_s):
         a_norm = tf.nn.l2_normalize(a, axis=2)
         e_w_norm = tf.nn.l2_normalize(e_w, axis=2)
         R_ik = tf.einsum('bilk,bil->bik', a_norm, e_w_norm)  # cosine for T (words,img_reps) for all pairs
-        R_ik = tf.identity(R_ik, name='level_score_word')
+        R_ik = tf.identity(R_ik, name='level_score_word') # ?xTx4
         R_i = tf.reduce_max(R_ik, axis=-1, name='score_word')  # ?xT
         # R = tf.log(tf.pow(tf.reduce_sum(tf.exp(gamma_1*R_i),axis=1),1/gamma_1)) #? corrs
         # heatmap
@@ -415,54 +495,9 @@ def attn(e_w, v, e_s):
     return heatmap_wd, heatmap_sd, R_i, R_s
 
 
-def attn_new(e_w, v, e_s):
-    '''
-    e_w:?xTXD , v:?XNx1XD, e_s:?XD
-    return: heatmap_wd ?xTX (37X37) , heatmap_sd ?X(37X37)
-    '''
-    v = tf.squeeze(v, 2)
 
-    with tf.variable_scope('attention'):
-        resolution = v.get_shape()[1]
-        dim = tf.shape(v)[2]
-        wrd_len = tf.shape(e_w)[1]
-        N0_g = int(np.sqrt(v.get_shape().as_list()[1]))
-        ### Word-Level
+######################################     Loss   #############################################################
 
-        new_e_w = tf.expand_dims(e_w, 2)  # ?TX1XD
-        new_e_w = tf.tile(new_e_w, [1, 1, resolution, 1])  # ?xT*NXD
-        new_v = tf.expand_dims(v, 1)  # ?x1XNXD
-        new_v = tf.tile(new_v, [1, wrd_len, 1, 1])  # ?xT*NXD
-        v_w = tf.concat([new_e_w, new_v], axis=3)  # ?xT*NX2D
-
-    h_w = tf.layers.dense(v_w, units=512, name='attn_space_1', reuse=tf.AUTO_REUSE)  # ?xT*NX512
-    h_w = tf.math.tanh(h_w)
-    h_w = tf.layers.dense(h_w, units=1, name='attn_space_2', reuse=tf.AUTO_REUSE)  # ?xT*NX1
-
-    with tf.variable_scope('attention'):
-        h_w = tf.squeeze(h_w, 3)  # ?xT*N
-        h_w = tf.nn.relu(h_w)  # ?xT*N
-        heatmap_wd = tf.reshape(h_w, [tf.shape(h_w)[0], tf.shape(h_w)[1], N0_g, N0_g],
-                                name="heatmap_word")  # ?xTX37X37
-        ### Sentence-Level ###
-        new_e_s = tf.expand_dims(e_s, 1)  # ?x1XD
-        new_e_s = tf.tile(new_e_s, [1, resolution, 1])  # ?xNXD
-        v_s = tf.concat([new_e_s, v], axis=2)  # ?xNX2D
-
-    h_s = tf.layers.dense(v_s, units=512, name='attn_space_1', reuse=tf.AUTO_REUSE)  # ?xNX512
-    h_s = tf.math.tanh(h_s)
-    h_s = tf.layers.dense(h_s, units=1, name='attn_space_2', reuse=tf.AUTO_REUSE)  # ?xNx1
-
-    with tf.variable_scope('attention'):
-        h_s = tf.squeeze(h_s, -1)
-        h_s = tf.nn.relu(h_s)  # ?*N
-        heatmap_sd = tf.reshape(h_s, [-1, N0_g, N0_g], name="heatmap_sentence")  # ?X37X37
-
-    return heatmap_wd, heatmap_sd
-
-
-
-# LOSS
 def seg_loss(heatmap, mask):
     with tf.variable_scope('seg_loss'):
         # l_b = tf.nn.l2_loss(box_pred-box)
@@ -558,8 +593,12 @@ def attn_loss_new(e_w, v, e_s, gamma_1, gamma_2):
 
     return loss
 
-
 def attn_loss(e_w, v, e_s, gamma_1, gamma_2):
+    '''
+    in batch take sentence and image and calculate score by dot max relevamt image/caption pair and same loss for caption/image pair
+    for all words calculate one score and use that in similar way 
+    
+    '''
     # e: ?xTxD, v: ?xNx4xD, e_bar: ?xD
     with tf.variable_scope('attention_loss'):
         ###word-level###
@@ -604,6 +643,75 @@ def attn_loss(e_w, v, e_s, gamma_1, gamma_2):
         loss = L1_w + L2_w + L1_s + L2_s
 
     return loss
+
+def attn_loss_token(e_w, v, e_s, gamma_1, gamma_2, word_mask):
+    '''
+    in batch take sentence and image and calculate score by dot max relevamt image/caption pair and same loss for caption/image pair
+    for all words calculate one score and use that in similar way 
+    word_mask ?x100
+    
+    '''
+    # e: ?xTxD, v: ?xNx4xD, e_bar: ?xD
+    with tf.variable_scope('attention_loss'):
+        ###word-level###
+        # heatmap
+        h = tf.nn.relu(tf.einsum('bij,cklj->bcikl', e_w, v))  # pair-wise ev^T: ?x?xTxNx4(wordxsen)
+        
+        # attention
+        a = tf.einsum('bcijl,cjlk->bcikl', h, v)  # ?x?xTxDx4 attnded visual reps for each of T words for all pairs
+        # pair-wise score
+        a_norm = tf.nn.l2_normalize(a, axis=3)
+        e_w_norm = tf.nn.l2_normalize(e_w, axis=2)
+        R_ik = tf.einsum('bcilk,bil->bcik', a_norm, e_w_norm)  # cosine for T (words,img_reps) for all pairs?x?xTX4
+        # level dropout
+        # R_ik_sh = R_ik.get_shape().as_list()
+        # R_ik = tf.layers.dropout(R_ik,rate=0.5,noise_shape=[1,1,1,R_ik_sh[3]],
+        #                         training=isTraining)
+        R_i = tf.reduce_max(R_ik, axis=-1)  # ?x?xT
+        
+        # tokenize
+        max_len = tf.shape(R_i)[2]
+        
+        word_mask_new = word_mask[:,:max_len]  #?xT
+        word_mask_new = tf.expand_dims(word_mask_new,1)#?x1XT
+        
+        batch_size_new =  tf.shape(word_mask_new)[0]
+        
+        word_mask_new  = tf.tile(word_mask_new, [1,batch_size_new,1],name = 'word_mask_final') #?x?XT
+        #word_mask_new = tf.expand_dims(word_mask_new,3) #?x?XTX1
+        print('mask Shape',  word_mask_new.shape)
+        
+        R_i_mask = tf.math.multiply(R_i, word_mask_new,name = 'final_R_i') #?x?xT#1
+        
+        R = tf.log(tf.pow(tf.reduce_sum(tf.exp(gamma_1 * R_i_mask), axis=2), 1 / gamma_1))  # ?x? cap-img pairs
+        # posterior probabilities
+        P_DQ = tf.diag_part(tf.nn.softmax(gamma_2 * R, axis=0))  # P(cap match img)
+        P_QD = tf.diag_part(tf.nn.softmax(gamma_2 * R, axis=1))  # p(img match cap)
+        # losses
+        L1_w = -tf.reduce_mean(tf.log(P_DQ))
+        L2_w = -tf.reduce_mean(tf.log(P_QD))
+
+        ###sentence-level###
+        # heatmap
+        h_s = tf.nn.relu(tf.einsum('bj,cklj->bckl', e_s, v))  # pair-wise e_bar*v^T: ?x?xNx4
+        # attention
+        a_s = tf.einsum('bcjk,cjkl->bclk', h_s, v)  # ?x?xDx4 attnded visual reps for sen. for all pairs
+        # pair-wise score
+        a_s_norm = tf.nn.l2_normalize(a_s, axis=2)
+        e_s_norm = tf.nn.l2_normalize(e_s, axis=1)
+        R_sk = tf.einsum('bclk,bl->bck', a_s_norm, e_s_norm)  # cosine for (sen,img_reps) for all pairs
+        R_s = tf.reduce_max(R_sk, axis=-1)  # ?x?
+        # posterior probabilities
+        P_DQ_s = tf.diag_part(tf.nn.softmax(gamma_2 * R_s, axis=0))  # P(cap match img)
+        P_QD_s = tf.diag_part(tf.nn.softmax(gamma_2 * R_s, axis=1))  # P(img match cap)
+        # losses
+        L1_s = -tf.reduce_mean(tf.log(P_DQ_s))
+        L2_s = -tf.reduce_mean(tf.log(P_QD_s))
+        # overall loss
+        loss = L1_w + L2_w + L1_s + L2_s
+
+    return loss
+
 
 
 
