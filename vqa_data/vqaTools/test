@@ -1,0 +1,5 @@
+question_answer_image[Id] = {"answer_id": answer_dict[answer["answer"]],\
+                                         "answer_type": ann["answer_type"],\
+                                         "answer": answer["answer"], \
+                                         "question_type": ann["question_type"], \
+                                         "image_id": ann["image_id"]}
