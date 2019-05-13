@@ -7,6 +7,7 @@ import cv2
 import nltk
 from nltk.corpus import stopwords
 from nltk import word_tokenize
+remove_list = ['a','the','it','are','did','an','is']
 
 # Print Tensors
 def tf_print(tensor, transform=None):
@@ -119,7 +120,13 @@ def batch_gen_token(valid_ids, annot_dict, train_images, n_batch):
     '''
     img_batch = np.empty((n_batch, 299, 299, 3), dtype='float32')
     cap_batch = []
+
+    word_mask = np.zeros((n_batch,100))
+
     word_mask = np.zeros((32,100))
+    
+    remove_list = ['a','the','it','are','did','an','is']
+
 
     chosen_ids = random.sample(valid_ids, n_batch)
     for i, chosen_id in enumerate(chosen_ids):
@@ -130,7 +137,7 @@ def batch_gen_token(valid_ids, annot_dict, train_images, n_batch):
         wrds = sentence.split()
         commonwords= np.zeros(100)
         for c, x in enumerate(wrds):
-            if x.lower() in stopwords.words('english'):
+            if x.lower() in remove_list: #stopwords.words('english'):
                 commonwords[c] = 0
             else:
                 commonwords[c] = 1
@@ -139,6 +146,58 @@ def batch_gen_token(valid_ids, annot_dict, train_images, n_batch):
         cap_batch.append(sentence)
         
     return img_batch, cap_batch, word_mask
+
+def seg_preprocess(annot_dict, msk_size):
+    '''
+    add the segmentation mask info in the batch
+    '''
+    all_ids = list(annot_dict.keys())
+    msk_batch = np.empty((30, msk_size, msk_size))
+    
+    for x in all_ids:
+        cat_sen = []
+        cat_dict = {}
+        for j, ann in enumerate(annot_dict[x]['annotations']):
+            cat = '_'.join(ann['category'].split())
+            cat_mask = annToMask(ann, size)
+            if cat not in cat_dict:
+                cat_dict[cat] = cat_mask
+            else:
+                cat_dict[cat] = cat_dict[cat] + cat_mask
+                
+        counter = 0
+        for k, v in cat_dict.items():
+            cat_sen.append(k)
+            np.clip(v, 0, 1, out=v)
+            msk_batch[counter, :, :] = cv2.resize(v, (msk_size, msk_size))
+            counter += 1
+            
+        annot_dict[x]['cat_sen'] = ' '.join(cat_sen)
+        annot_dict[x]['mask']  = msk_batch 
+        
+    return annot_dict
+        
+            
+def batch_gen_seg_fast(ids, annot_dict, train_images, n_batch,msk_size):
+    '''
+    
+    Loads images and for each categories it concatenates all mask and returns categories as CAT1_CAT2_CAT2
+    '''
+    img_batch = np.empty((n_batch, 299, 299, 3), dtype='float32')
+    cat_batch = []
+    msk_batch = np.empty((n_batch, 100, msk_size, msk_size))  # maximum 100 category per-image
+    
+    chosen_ids = random.sample(valid_ids, n_batch)
+    
+    for i, chosen_id in enumerate(chosen_ids):
+        imgbin = train_images[chosen_id]
+        img_batch[i,:,:,:] = imgbin
+        cat_batch.append(annot_dict[chosen_id]['cat_sen'])
+        msk_batch[i,:30, :, :] = annot_dict[chosen_id]['mask']
+  
+    return cat_batch, msk_batch,img_batch
+
+    
 
 
 def batch_gen_seg(ids, annot_dict, txn, n_batch,msk_size):
@@ -175,7 +234,7 @@ def batch_gen_seg(ids, annot_dict, txn, n_batch,msk_size):
         img_batch[i,:,:,:] = cv2.resize(img,(299,299))
         size = annot_dict[choice_id]['size']
         cat_sen = []
-     
+  
         cat_dict = {}
         for j, ann in enumerate(annot_dict[choice_id]['annotations']):
             cat = '_'.join(ann['category'].split())
